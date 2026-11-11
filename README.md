@@ -55,4 +55,4 @@ The architectural concepts, mathematical formulations, and whitepaper are protec
 
 For commercial licensing, R&D consulting, or core engine integration inquiries, please contact the author directly:
 - **Author:** Vadim Efremov (Independent Engine R&D Architect)
-- **Email:** `[ВСТАВЬТЕ ВАШ EMAIL]`
+- **Email:** ve807377@gmail.com
