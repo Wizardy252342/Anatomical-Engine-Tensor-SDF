@@ -24,6 +24,14 @@ Modern large-scale space simulators and open-world engines (such as *StarEngine*
 
 ---
 
+## Hybrid Rendering Architecture (StarEngine / AAA Pipeline Integration)
+
+A common misconception regarding pure Signed Distance Field (SDF) engines is the difficulty of modeling intricate, hard-surface man-made assets such as modular spacecraft, character rigging, or complex mechanical interiors. **Anatomical Engine** is explicitly designed as a **hybrid spatial and physics core** meant to augment—rather than replace—existing rasterization pipelines:
+
+* **Macro-Scale & Subterranean Pass (Tensor SDF):** Planetary bodies (30,000+ km), 100-km subterranean cave networks, destructible terrain, and volumetric atmospheric/magnetic fields are evaluated via GPU Spherical Ray Marching on Compute Shaders and Tensor Cores.
+* **Dynamic Entity Pass (Standard Mesh / Rasterization):** Spacecraft, characters, and intricate architectural modules are rendered via traditional hardware rasterization or mesh shaders.
+* **Unified Depth Buffer & Physics Coupling:** Both passes share a unified hardware depth buffer (`Z-Buffer`) for seamless visual occlusion. Simultaneously, dynamic mesh entities query the underlying SDF continuum at their bounding vertices to receive real-time collision responses, Poisson gravitational shielding, and Lorentz electromagnetic thrust deflections without heavy mesh-to-mesh collision overhead.
+
 ## Interactive GPU Proof-of-Concept (`src/main.cpp`)
 
 This repository includes a lightweight, zero-bloat C++17 / OpenGL 3.3 real-time sandbox demonstrating the core shader pipeline:
