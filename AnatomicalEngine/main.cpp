@@ -13,6 +13,102 @@
 #include <cstdlib>
 #include <cstdint>
 #include <atomic>
+#include <fstream>
+#include <cstring>
+
+
+#include <vector>
+
+struct ContinentStreamer {
+    uint32_t gridX = 1;
+    uint32_t gridZ = 1;
+    uint32_t harmsPerChunk = 24;
+    float chunkSize = 3000.0f;
+    float rockDetail = 16.0f;
+    float colorLow[3] = { 0.1f, 0.75f, 1.0f };
+    float colorHigh[3] = { 1.0f, 0.65f, 0.2f };
+
+
+    std::vector<float> allChunksData; // Все чанки континента в RAM
+    float active3x3Harmonics[9 * 24 * 4] = { 0.0f }; // Активное окно 3x3 для GPU
+    int active3x3Coords[9 * 2] = { 0 };
+    int currentCenterX = -9999;
+    int currentCenterZ = -9999;
+    bool loaded = false;
+
+    bool LoadAtlas(const char* filename) {
+        std::ifstream file(filename, std::ios::binary);
+        if (!file.is_open()) {
+            std::cerr << "[Streaming] Atlas not found: " << filename << "\n";
+            return false;
+        }
+        char magic[4] = { 0 };
+        file.read(magic, 4);
+        if (std::strncmp(magic, "ACNT", 4) != 0) {
+            std::cerr << "[Streaming] Invalid ACNT magic header!\n";
+            return false;
+        }
+
+        uint32_t pad[4] = { 0 };
+        file.read(reinterpret_cast<char*>(&gridX), sizeof(uint32_t));
+        file.read(reinterpret_cast<char*>(&gridZ), sizeof(uint32_t));
+        file.read(reinterpret_cast<char*>(&harmsPerChunk), sizeof(uint32_t));
+        file.read(reinterpret_cast<char*>(&chunkSize), sizeof(float));
+        file.read(reinterpret_cast<char*>(&rockDetail), sizeof(float));
+        file.read(reinterpret_cast<char*>(colorLow), sizeof(float) * 3);
+        file.read(reinterpret_cast<char*>(colorHigh), sizeof(float) * 3);
+        file.read(reinterpret_cast<char*>(pad), sizeof(uint32_t) * 4);
+
+        size_t totalFloats = static_cast<size_t>(gridX) * gridZ * 24 * 4;
+        allChunksData.resize(totalFloats, 0.0f);
+        file.read(reinterpret_cast<char*>(allChunksData.data()), totalFloats * sizeof(float));
+
+        currentCenterX = -9999;
+        currentCenterZ = -9999;
+        loaded = true;
+        std::cout << "[Streaming] Loaded Continent Atlas (" << gridX << "x" << gridZ
+                  << " chunks, " << (gridX * chunkSize) / 1000.0f << " km wide)\n";
+        return true;
+    }
+
+    void UpdateWindowAroundCamera(float camX, float camZ) {
+        if (!loaded || allChunksData.empty()) return;
+
+        // Координаты континента отцентрированы вокруг (0, 0)
+        float halfTotalX = (gridX * chunkSize) * 0.5f;
+        float halfTotalZ = (gridZ * chunkSize) * 0.5f;
+
+        int cx = static_cast<int>(std::floor((camX + halfTotalX) / chunkSize));
+        int cz = static_cast<int>(std::floor((camZ + halfTotalZ) / chunkSize));
+        cx = std::max(0, std::min(static_cast<int>(gridX) - 1, cx));
+        cz = std::max(0, std::min(static_cast<int>(gridZ) - 1, cz));
+
+        if (cx == currentCenterX && cz == currentCenterZ) return;
+
+        currentCenterX = cx;
+        currentCenterZ = cz;
+        int slot = 0;
+
+        for (int dz = -1; dz <= 1; ++dz) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                int nx = std::max(0, std::min(static_cast<int>(gridX) - 1, cx + dx));
+                int nz = std::max(0, std::min(static_cast<int>(gridZ) - 1, cz + dz));
+
+                active3x3Coords[slot * 2 + 0] = nx;
+                active3x3Coords[slot * 2 + 1] = nz;
+
+                size_t srcOffset = (static_cast<size_t>(nz) * gridX + nx) * 24 * 4;
+                size_t dstOffset = static_cast<size_t>(slot) * 24 * 4;
+                std::memcpy(&active3x3Harmonics[dstOffset], &allChunksData[srcOffset], 24 * 4 * sizeof(float));
+                slot++;
+            }
+        }
+        std::cout << "[Streaming] Active 3x3 window centered on Chunk [" << cx << ", " << cz << "]\n";
+    }
+};
+
+ContinentStreamer g_Continent;
+
 
 // Подключаем наше единое независимое C++17 SDK ядро!
 #include "AnatomicalCore.hpp"
@@ -54,7 +150,7 @@ Vec3 waveOrigin = { 0.0f, 450.0f, 1000.0f };
 float waveRadius = 0.0f;
 float waveFrontSpeed = 45000.0f;
 
-Vec3 camPos = { 0.0f, 450.0f, 1000.0f };
+Vec3 camPos = { 0.0f, 650.0f, -1600.0f };
 Vec3 camVel = { 0.0f, 0.0f, 0.0f };
 bool physicsCollisionEnabled = true;
 bool cityModeEnabled = true;
@@ -142,7 +238,7 @@ void InitNetworkUDP() {
 }
 
 void SendESNPacket256(uint32_t opType, Vec3 pos, float tempK, uint32_t seedVal = 0) {
-    if (udpSocket == INVALID_SOCKET) return;
+    if (udpSocket == INVALID_SOCKET || !pos.IsValid()) return;
 
     ESNPacket256 pkt{};
     pkt.senderId = localNodeId;
@@ -152,6 +248,7 @@ void SendESNPacket256(uint32_t opType, Vec3 pos, float tempK, uint32_t seedVal =
     pkt.posY = pos.y;
     pkt.posZ = pos.z;
     pkt.temperatureK = tempK;
+    pkt.Seal(); // Подписываем пакет 64-битной контрольной суммой FNV-1a
 
     uint16_t targetPort = (boundPort == 7777) ? 7778 : 7777;
     sockaddr_in dest{};
@@ -208,7 +305,9 @@ void PollNetworkUDP() {
     sockaddr_in from{};
     int fromLen = sizeof(from);
 
-    while (true) {
+    // Защита от сетевого флуда: читаем не более 64 пакетов за один кадр
+    int processed = 0;
+    while (processed < 64) {
         int bytes = recvfrom(
             udpSocket,
             reinterpret_cast<char*>(&pkt),
@@ -218,6 +317,8 @@ void PollNetworkUDP() {
             &fromLen
         );
         if (bytes != sizeof(ESNPacket256)) break;
+        processed++;
+
         if (!pkt.IsValid() || pkt.senderId == localNodeId) continue;
 
         networkPacketsRecv++;
@@ -296,6 +397,14 @@ uniform vec3 uWaveOrigin;
 uniform float uWaveRadius;
 uniform int uWaveActive;
 uniform int uCityMode;
+uniform vec4 uStreamHarmonics[216];
+uniform ivec2 uStreamCoords[9];
+uniform ivec2 uContinentGrid;
+uniform float uChunkSize;
+uniform float uRockDetail;
+uniform vec3 uContourLow;
+uniform vec3 uContourHigh;
+
 
 const mat3 rotSO3 = mat3(
      0.36,  0.48, -0.80,
@@ -358,56 +467,50 @@ float EvalSpatialGridCraters(vec3 p, out float outTempK) {
     return totalDelta;
 }
 
-// Сверхбыстрый SDF геометрии города (без расчета окон внутри цикла луча!)
-float ArcCorpCityFastSDF(vec3 p) {
-    float blockSize = 220.0;
-    vec2 cellID = floor(p.xz / blockSize);
-    vec2 localXZ = mod(p.xz, blockSize) - blockSize * 0.5;
-    float rnd = Hash21(cellID);
-    
-    // Шахты-входы в 105-км подземные пещеры
-    if (rnd > 0.91 && p.z > 0.0 && p.z < 105000.0) return 150.0;
-    
-    float rnd2 = Hash21(cellID + vec2(17.3, 41.9));
-    float bHeight = 120.0 + pow(rnd, 1.8) * 680.0;
-    vec2 bHalfSize = vec2(58.0 + rnd2 * 28.0, 58.0 + rnd * 28.0);
-    
-    vec3 q = abs(vec3(localXZ.x, p.y - bHeight * 0.5, localXZ.y)) - vec3(bHalfSize.x, bHeight * 0.5, bHalfSize.y);
-    float towerSDF = length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
-    return min(towerSDF, p.y);
+
+float EvalSingleChunk(int slot, vec2 localXZ) {
+    float h = 0.0;
+    int base = slot * 24;
+    for (int i = 0; i < 24; i++) {
+        vec4 harm = uStreamHarmonics[base + i];
+        h += harm.x * cos(localXZ.x * harm.y + localXZ.y * harm.z + harm.w);
+    }
+    return h;
 }
 
-// Расчет неоновых окон, маяков и трафика спидеров (вызывается ОДИН РАЗ при попадании луча!)
-vec3 EvaluateCityGlowAtHit(vec3 p) {
-    float blockSize = 220.0;
-    vec2 cellID = floor(p.xz / blockSize);
-    vec2 localXZ = mod(p.xz, blockSize) - blockSize * 0.5;
-    float rnd = Hash21(cellID);
-    float rnd2 = Hash21(cellID + vec2(17.3, 41.9));
-    float bHeight = 120.0 + pow(rnd, 1.8) * 680.0;
-    vec2 bHalfSize = vec2(58.0 + rnd2 * 28.0, 58.0 + rnd * 28.0);
-    
-    vec3 glow = vec3(0.0);
-    if (p.y > 15.0 && p.y < bHeight - 8.0) {
-        float winY = fract(p.y * 0.14);
-        float winX = fract((localXZ.x + localXZ.y) * 0.12);
-        float winMask = step(0.35, winY) * step(0.3, winX);
-        float lit = step(0.45, Hash21(floor(vec2((localXZ.x + localXZ.y) * 0.12, p.y * 0.14)) + cellID));
-        vec3 winColor = (rnd2 > 0.5) ? vec3(1.0, 0.65, 0.25) : vec3(0.25, 0.85, 1.0);
-        glow += winColor * winMask * lit * 1.45;
+float EvaluateContinentSDF(vec3 p) {
+    vec2 halfTotal = vec2(uContinentGrid) * uChunkSize * 0.5;
+    vec2 clampedXZ = clamp(p.xz, -halfTotal, halfTotal - vec2(1.0));
+    ivec2 targetChunk = ivec2(floor((clampedXZ + halfTotal) / uChunkSize));
+
+    int bestSlot = 4;
+    for (int s = 0; s < 9; s++) {
+        if (uStreamCoords[s] == targetChunk) {
+            bestSlot = s;
+            break;
+        }
     }
-    if (p.y > bHeight - 5.0 && length(localXZ) < 16.0) {
-        float pulse = 0.5 + 0.5 * sin(uTime * 5.0 + rnd * 10.0);
-        glow += vec3(1.0, 0.12, 0.08) * pulse * 2.5;
-    }
-    float laneH = abs(p.y - (140.0 + floor(rnd2 * 3.0) * 90.0));
-    if (laneH < 12.0) {
-        float t1 = pow(max(0.0, sin(p.z * 0.03 - uTime * 18.0 + cellID.x)), 16.0);
-        float t2 = pow(max(0.0, sin(p.x * 0.03 + uTime * 22.0 + cellID.y)), 16.0);
-        glow += vec3(1.0, 0.2, 0.1) * t1 * 2.0 + vec3(0.2, 0.8, 1.0) * t2 * 2.0;
-    }
-    return glow;
+
+    vec2 chunkCenter = (vec2(targetChunk) + vec2(0.5)) * uChunkSize - halfTotal;
+    vec2 localXZ = clampedXZ - chunkCenter;
+
+    float terrainH = EvalSingleChunk(bestSlot, localXZ);
+    float baseDist = (p.y - terrainH) * 0.7;
+    float rockMicro = EscherTensorNoise(p) * uRockDetail * exp(-0.0002 * baseDist * baseDist);
+    return baseDist + rockMicro;
 }
+
+float ArcCorpCityFastSDF(vec3 p) {
+    return EvaluateContinentSDF(p);
+}
+
+vec3 EvaluateCityGlowAtHit(vec3 p) {
+    float contour = pow(abs(sin(p.y * 0.03)), 12.0);
+    vec3 ridgeGlow = mix(uContourLow, uContourHigh, clamp((p.y + 150.0) / 450.0, 0.0, 1.0));
+    return ridgeGlow * contour * 1.3;
+}
+
+
 
 float LiquidMetalOceanSDF(vec3 p) {
     float wave1 = sin(p.x * 0.025 + uTime * 1.8) * cos(p.z * 0.025 - uTime * 1.3) * 4.5;
@@ -450,11 +553,11 @@ float GetDistanceAndPhysics(vec3 p, out vec3 outMagField, out float outTempK, ou
         sin(p.z * 0.002)
     );
     
-    if (uCityMode == 1 && p.y > -20.0) {
-        outMatID = 3;
-        return ArcCorpCityFastSDF(p) + deltaDestruction;
+    if (uCityMode == 1 && p.y > -400.0) {
+    outMatID = 3;
+    return ArcCorpCityFastSDF(p) + deltaDestruction;
     }
-    
+
     float rockSDF = baseSDF + microDetails + deltaDestruction;
     float oceanSDF = LiquidMetalOceanSDF(p);
     if (oceanSDF < rockSDF && p.z > 0.0 && p.z < 105000.0) {
@@ -655,24 +758,49 @@ void mouse_button_callback(
     }
 }
 
-unsigned int CompileShaderProgram(const char* vsSrc, const char* fsSrc) {
+void CheckShaderStatus(unsigned int obj, bool isProgram, const char* label) {
+    int success = 0;
+    char infoLog[1024];
+    if (isProgram) {
+        glGetProgramiv(obj, GL_LINK_STATUS, &success);
+        if (!success) {
+            glGetProgramInfoLog(obj, 1024, NULL, infoLog);
+            std::cerr << "[CRITICAL GPU LINK ERROR] (" << label << "):\n" << infoLog << "\n";
+        }
+    } else {
+        glGetShaderiv(obj, GL_COMPILE_STATUS, &success);
+        if (!success) {
+            glGetShaderInfoLog(obj, 1024, NULL, infoLog);
+            std::cerr << "[CRITICAL SHADER COMPILE ERROR] (" << label << "):\n" << infoLog << "\n";
+        }
+    }
+}
+
+unsigned int CompileShaderProgram(const char* vsSrc, const char* fsSrc, const char* label) {
     unsigned int vs = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vs, 1, &vsSrc, NULL);
     glCompileShader(vs);
+    CheckShaderStatus(vs, false, label);
 
     unsigned int fs = glCreateShader(GL_FRAGMENT_SHADER);
     glShaderSource(fs, 1, &fsSrc, NULL);
     glCompileShader(fs);
+    CheckShaderStatus(fs, false, label);
 
     unsigned int prog = glCreateProgram();
     glAttachShader(prog, vs);
     glAttachShader(prog, fs);
     glLinkProgram(prog);
+    CheckShaderStatus(prog, true, label);
+
+    glDeleteShader(vs);
+    glDeleteShader(fs);
     return prog;
 }
 
 int main() {
     InitNetworkUDP();
+    g_Continent.LoadAtlas("compiled_continent.acont");
 
     WAVEFORMATEX wfx{};
     wfx.wFormatTag = WAVE_FORMAT_PCM;
@@ -722,11 +850,12 @@ int main() {
     gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
 
     unsigned int coarseProgram = CompileShaderProgram(
-        vertexShaderSource, coarseFragmentShaderSource
+        vertexShaderSource, coarseFragmentShaderSource, "CoarsePass"
     );
     unsigned int mainProgram = CompileShaderProgram(
-        vertexShaderSource, mainFragmentShaderSource
+        vertexShaderSource, mainFragmentShaderSource, "MainPass"
     );
+
 
     unsigned int coarseFBO, coarseDepthTex;
     glGenFramebuffers(1, &coarseFBO);
@@ -908,8 +1037,13 @@ int main() {
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        int fbWidth, fbHeight;
-        glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
+                int fbWidth = 0, fbHeight = 0;
+                glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
+                if (fbWidth <= 0 || fbHeight <= 0) {
+                    glfwPollEvents();
+                    continue;
+        }
+        
         glViewport(0, 0, fbWidth, fbHeight);
 
         glUseProgram(mainProgram);
@@ -943,11 +1077,55 @@ int main() {
             glGetUniformLocation(mainProgram, "uCityMode"), 
             cityModeEnabled ? 1 : 0
         );
+                // Обновляем активное окно 3x3 чанков вокруг камеры
+        g_Continent.UpdateWindowAroundCamera(camPos.x, camPos.z);
 
+        // Передаём активные чанки и параметры континента на GPU
+        glUniform4fv(
+            glGetUniformLocation(mainProgram, "uStreamHarmonics"),
+            216, g_Continent.active3x3Harmonics
+        );
+        glUniform2iv(
+            glGetUniformLocation(mainProgram, "uStreamCoords"),
+            9, g_Continent.active3x3Coords
+        );
+        glUniform2i(
+            glGetUniformLocation(mainProgram, "uContinentGrid"),
+            g_Continent.gridX, g_Continent.gridZ
+        );
+        glUniform1f(
+            glGetUniformLocation(mainProgram, "uChunkSize"),
+            g_Continent.chunkSize
+        );
+        glUniform1f(
+            glGetUniformLocation(mainProgram, "uRockDetail"),
+            g_Continent.rockDetail
+        );
+        glUniform3fv(
+            glGetUniformLocation(mainProgram, "uContourLow"),
+            1, g_Continent.colorLow
+        );
+        glUniform3fv(
+            glGetUniformLocation(mainProgram, "uContourHigh"),
+            1, g_Continent.colorHigh
+        );
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
+        
         glfwSwapBuffers(window);
         glfwPollEvents();
+
+        // Горячая перезагрузка скомпилированного мира .aworld по клавише R
+                static bool rKeyPressed = false;
+        if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS && !rKeyPressed) {
+            std::cout << "[Hot-Reload] Reloading compiled_continent.acont...\n";
+            g_Continent.LoadAtlas("compiled_continent.acont");
+            rKeyPressed = true;
+        }
+        if (glfwGetKey(window, GLFW_KEY_R) == GLFW_RELEASE) {
+            rKeyPressed = false;
+        }
+
     }
 
     if (audioReady) {
@@ -958,6 +1136,15 @@ int main() {
     }
     if (udpSocket != INVALID_SOCKET) closesocket(udpSocket);
     WSACleanup();
+        glDeleteProgram(coarseProgram);
+        glDeleteProgram(mainProgram);
+        glDeleteTextures(1, &coarseDepthTex);
+        glDeleteTextures(1, &hashTex);
+        glDeleteBuffers(1, &hashTBO);
+        glDeleteBuffers(1, &VBO);
+        glDeleteVertexArrays(1, &VAO);
+        glDeleteFramebuffers(1, &coarseFBO);
+
     glfwTerminate();
     return 0;
 }

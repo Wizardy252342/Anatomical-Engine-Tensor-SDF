@@ -9,25 +9,36 @@
 namespace Anatomical {
 
 // ============================================================================
-// 1. ЛИНЕЙНАЯ АЛГЕБРА И МАТРИЧНЫЕ ОПЕРАТОРЫ ЛИ-АЛГЕБРЫ SO(3)
+// 1. БЕЗОПАСНАЯ ЛИНЕЙНАЯ АЛГЕБРА И ПРОВЕРКА КОНЕЧНОСТИ ДАННЫХ (NAN/INF GUARD)
 // ============================================================================
+
+inline bool IsSafeFloat(float v) {
+    return std::isfinite(v);
+}
 
 struct Vec3 {
     float x = 0.0f;
     float y = 0.0f;
     float z = 0.0f;
 
+    bool IsValid() const {
+        return IsSafeFloat(x) && IsSafeFloat(y) && IsSafeFloat(z);
+    }
+
     Vec3 operator+(const Vec3& r) const { return { x + r.x, y + r.y, z + r.z }; }
     Vec3 operator-(const Vec3& r) const { return { x - r.x, y - r.y, z - r.z }; }
     Vec3 operator*(float s) const { return { x * s, y * s, z * s }; }
-    Vec3 operator/(float s) const { return { x / s, y / s, z / s }; }
+    Vec3 operator/(float s) const {
+        if (!IsSafeFloat(s) || std::abs(s) < 1e-8f) return { 0.0f, 0.0f, 0.0f };
+        return { x / s, y / s, z / s };
+    }
 
     float Dot(const Vec3& r) const { return x * r.x + y * r.y + z * r.z; }
     Vec3 Cross(const Vec3& r) const {
         return { y * r.z - z * r.y, z * r.x - x * r.z, x * r.y - y * r.x };
     }
     float LengthSq() const { return x * x + y * y + z * z; }
-    float Length() const { return std::sqrt(LengthSq()); }
+    float Length() const { return std::sqrt(std::max(0.0f, LengthSq())); }
     Vec3 Normalized() const {
         float l = Length();
         return (l > 1e-6f) ? (*this / l) : Vec3{ 0.0f, 0.0f, 0.0f };
@@ -64,19 +75,19 @@ struct Mat3 {
 };
 
 // ============================================================================
-// 2. АНАЛИТИЧЕСКИЕ ПРИМИТИВЫ И ГЛАДКИЕ БУЛЕВЫ ОПЕРАТОРЫ (SMOOTH CSG)
+// 2. АНАЛИТИЧЕСКИЕ ПРИМИТИВЫ И ГЛАДКИЕ БУЛЕВЫ ОПЕРАТОРЫ
 // ============================================================================
 
 namespace SDF {
     inline float Sphere(const Vec3& p, const Vec3& center, float radius) {
-        return (p - center).Length() - radius;
+        return (p - center).Length() - std::max(0.0f, radius);
     }
 
     inline float Box(const Vec3& p, const Vec3& center, const Vec3& halfExtents) {
         Vec3 q = {
-            std::abs(p.x - center.x) - halfExtents.x,
-            std::abs(p.y - center.y) - halfExtents.y,
-            std::abs(p.z - center.z) - halfExtents.z
+            std::abs(p.x - center.x) - std::max(0.0f, halfExtents.x),
+            std::abs(p.y - center.y) - std::max(0.0f, halfExtents.y),
+            std::abs(p.z - center.z) - std::max(0.0f, halfExtents.z)
         };
         Vec3 qMax = { std::max(q.x, 0.0f), std::max(q.y, 0.0f), std::max(q.z, 0.0f) };
         float inside = std::min(std::max(q.x, std::max(q.y, q.z)), 0.0f);
@@ -84,21 +95,24 @@ namespace SDF {
     }
 
     inline float Gyroid(const Vec3& p, float scale) {
-        Vec3 g = p * scale;
+        float safeScale = (std::abs(scale) < 1e-6f) ? 1e-6f : scale;
+        Vec3 g = p * safeScale;
         float d = std::sin(g.x) * std::cos(g.y) +
                   std::sin(g.y) * std::cos(g.z) +
                   std::sin(g.z) * std::cos(g.x);
-        return std::abs(d) / scale;
+        return std::abs(d) / safeScale;
     }
 
     inline float SmoothUnion(float d1, float d2, float k) {
-        float h = std::max(k - std::abs(d1 - d2), 0.0f) / k;
-        return std::min(d1, d2) - h * h * k * 0.25f;
+        float safeK = std::max(1e-5f, k);
+        float h = std::max(safeK - std::abs(d1 - d2), 0.0f) / safeK;
+        return std::min(d1, d2) - h * h * safeK * 0.25f;
     }
 
     inline float SmoothSubtract(float d1, float d2, float k) {
-        float h = std::max(k - std::abs(-d1 - d2), 0.0f) / k;
-        return std::max(d1, -d2) + h * h * k * 0.25f;
+        float safeK = std::max(1e-5f, k);
+        float h = std::max(safeK - std::abs(-d1 - d2), 0.0f) / safeK;
+        return std::max(d1, -d2) + h * h * safeK * 0.25f;
     }
 
     inline float EscherMicroDetail(const Vec3& p, float baseSDF, float amplitude, float freq) {
@@ -115,7 +129,7 @@ namespace SDF {
 }
 
 // ============================================================================
-// 3. БЕСШОВНАЯ ПРОСТРАНСТВЕННАЯ ХЕШ-ТАБЛИЦА O(1) С ОРЕОЛОМ (HALO INSERTION)
+// 3. ОТКАЗОУСТОЙЧИВАЯ ПРОСТРАНСТВЕННАЯ ХЕШ-ТАБЛИЦА O(1) (HALO INSERTION)
 // ============================================================================
 
 struct PerturbationOperator {
@@ -125,6 +139,13 @@ struct PerturbationOperator {
     float timestamp = 0.0f;
     float temperatureK = 2800.0f;
     Vec3 anisotropy = { 1.15f, 0.92f, 1.08f };
+
+    bool IsValid() const {
+        return position.IsValid() &&
+               IsSafeFloat(radius) && radius > 0.0f &&
+               IsSafeFloat(intensity) &&
+               IsSafeFloat(timestamp) && timestamp >= 0.0f;
+    }
 };
 
 class SpatialHashGrid {
@@ -133,18 +154,25 @@ public:
     static constexpr int SLOTS_PER_BUCKET = 4;
 
     explicit SpatialHashGrid(float cellSize = 500.0f)
-        : m_cellSize(cellSize), m_gpuBuffer(BUCKETS * SLOTS_PER_BUCKET, { 0.0f, 0.0f, 0.0f, 0.0f }) {}
+        : m_cellSize(std::max(1.0f, IsSafeFloat(cellSize) ? cellSize : 500.0f)),
+          m_gpuBuffer(BUCKETS * SLOTS_PER_BUCKET, { 0.0f, 0.0f, 0.0f, 0.0f }) {}
 
-    // Бесшовная вставка: записывает оператор во все пересекаемые ячейки (до 8 октантов)
-    void InsertOperator(const PerturbationOperator& op) {
+    bool InsertOperator(const PerturbationOperator& op) {
+        if (!op.IsValid()) return false;
+
+        // Ограничиваем радиус ореола, чтобы один оператор не забил всю таблицу
         float influenceRadius = std::min(op.radius * 3.5f, m_cellSize * 0.48f);
 
-        int minX = static_cast<int>(std::floor((op.position.x - influenceRadius) / m_cellSize));
-        int maxX = static_cast<int>(std::floor((op.position.x + influenceRadius) / m_cellSize));
-        int minY = static_cast<int>(std::floor((op.position.y - influenceRadius) / m_cellSize));
-        int maxY = static_cast<int>(std::floor((op.position.y + influenceRadius) / m_cellSize));
-        int minZ = static_cast<int>(std::floor((op.position.z - influenceRadius) / m_cellSize));
-        int maxZ = static_cast<int>(std::floor((op.position.z + influenceRadius) / m_cellSize));
+        int centerX = static_cast<int>(std::floor(op.position.x / m_cellSize));
+        int centerY = static_cast<int>(std::floor(op.position.y / m_cellSize));
+        int centerZ = static_cast<int>(std::floor(op.position.z / m_cellSize));
+
+        int minX = std::max(centerX - 1, static_cast<int>(std::floor((op.position.x - influenceRadius) / m_cellSize)));
+        int maxX = std::min(centerX + 1, static_cast<int>(std::floor((op.position.x + influenceRadius) / m_cellSize)));
+        int minY = std::max(centerY - 1, static_cast<int>(std::floor((op.position.y - influenceRadius) / m_cellSize)));
+        int maxY = std::min(centerY + 1, static_cast<int>(std::floor((op.position.y + influenceRadius) / m_cellSize)));
+        int minZ = std::max(centerZ - 1, static_cast<int>(std::floor((op.position.z - influenceRadius) / m_cellSize)));
+        int maxZ = std::min(centerZ + 1, static_cast<int>(std::floor((op.position.z + influenceRadius) / m_cellSize)));
 
         for (int cz = minZ; cz <= maxZ; ++cz) {
             for (int cy = minY; cy <= maxY; ++cy) {
@@ -155,9 +183,12 @@ public:
         }
         m_totalCount++;
         m_dirty = true;
+        return true;
     }
 
     float EvaluateDeltaAt(const Vec3& p, float defaultRadius = 115.0f, float defaultDepth = 230.0f) const {
+        if (!p.IsValid()) return 0.0f;
+
         int cx = static_cast<int>(std::floor(p.x / m_cellSize));
         int cy = static_cast<int>(std::floor(p.y / m_cellSize));
         int cz = static_cast<int>(std::floor(p.z / m_cellSize));
@@ -165,7 +196,8 @@ public:
         int baseIdx = static_cast<int>(bucket) * SLOTS_PER_BUCKET;
 
         float totalDelta = 0.0f;
-        float maxRange = defaultRadius * 4.0f;
+        float safeRadius = std::max(1.0f, defaultRadius);
+        float maxRange = safeRadius * 4.0f;
         float maxRangeSq = maxRange * maxRange;
 
         for (int i = 0; i < SLOTS_PER_BUCKET; ++i) {
@@ -179,9 +211,9 @@ public:
                 float distSq = diff.LengthSq();
                 if (distSq < maxRangeSq) {
                     float dist = std::sqrt(distSq);
-                    float rNorm = dist / defaultRadius;
+                    float rNorm = dist / safeRadius;
                     float bowl = defaultDepth * std::exp(-0.5f * rNorm * rNorm);
-                    float rimTerm = (dist - defaultRadius * 2.08f) / (defaultRadius * 0.48f);
+                    float rimTerm = (dist - safeRadius * 2.08f) / (safeRadius * 0.48f);
                     float rim = -45.0f * std::exp(-0.5f * rimTerm * rimTerm);
                     totalDelta += (bowl + rim);
                 }
@@ -208,11 +240,12 @@ private:
     int m_totalCount = 0;
     bool m_dirty = true;
 
-    void InsertIntoSingleBucket(int cx, int cy, int cz, const PerturbationOperator& op) {
+        void InsertIntoSingleBucket(
+        int cx, int cy, int cz, const PerturbationOperator& op
+    ) {
         uint32_t bucket = ComputeHash(cx, cy, cz);
         int baseIdx = static_cast<int>(bucket) * SLOTS_PER_BUCKET;
 
-        // Избегаем дублирования при коллизии хеша для одной и той же координаты
         for (int i = 0; i < SLOTS_PER_BUCKET; ++i) {
             const Vec4& existing = m_gpuBuffer.at(baseIdx + i);
             if (existing.w > 0.5f) {
@@ -229,7 +262,9 @@ private:
         for (int i = SLOTS_PER_BUCKET - 1; i > 0; --i) {
             m_gpuBuffer.at(baseIdx + i) = m_gpuBuffer.at(baseIdx + i - 1);
         }
-        m_gpuBuffer.at(baseIdx) = { op.position.x, op.position.y, op.position.z, op.timestamp + 1.0f };
+        m_gpuBuffer.at(baseIdx) = { 
+            op.position.x, op.position.y, op.position.z, op.timestamp + 1.0f 
+        };
     }
 
     static uint32_t ComputeHash(int ix, int iy, int iz) {
@@ -240,8 +275,9 @@ private:
         return h % BUCKETS;
     }
 };
+
 // ============================================================================
-// 4. ФИЗИЧЕСКИЙ И ПАКЕТНЫЙ ЛИДАР-РЕШАТЕЛЬ (BATCH AI & SERVER SOLVER)
+// 4. ФИЗИЧЕСКИЙ И ПАКЕТНЫЙ ЛИДАР-РЕШАТЕЛЬ
 // ============================================================================
 
 class ISpatialWorld {
@@ -260,11 +296,13 @@ struct RayHitResult {
 
 class FieldPhysicsSolver {
 public:
-    static float EvaluateTotalSDF(const ISpatialWorld& world, const SpatialHashGrid& deltas, const Vec3& p) {
+    static float EvaluateTotalSDF(
+        const ISpatialWorld& world, const SpatialHashGrid& deltas, const Vec3& p
+    ) {
+        if (!p.IsValid()) return 0.0f;
         return world.EvaluateBaseSDF(p) + deltas.EvaluateDeltaAt(p);
     }
 
-    // Пакетная оценка поля для тысяч точек (ускорение роя ИИ-агентов)
     static void EvaluateBatchSDF(
         const ISpatialWorld& world,
         const SpatialHashGrid& deltas,
@@ -272,17 +310,25 @@ public:
         float* outDistances,
         size_t count
     ) {
+        if (!points || !outDistances) return;
         for (size_t i = 0; i < count; ++i) {
             outDistances[i] = EvaluateTotalSDF(world, deltas, points[i]);
         }
     }
 
-    static Vec3 ComputeNormal(const ISpatialWorld& world, const SpatialHashGrid& deltas, const Vec3& p, float eps = 0.5f) {
+    static Vec3 ComputeNormal(
+        const ISpatialWorld& world, 
+        const SpatialHashGrid& deltas, 
+        const Vec3& p, 
+        float eps = 0.5f
+    ) {
+        if (!p.IsValid()) return { 0.0f, 1.0f, 0.0f };
+        float safeEps = std::max(0.01f, eps);
         float d = EvaluateTotalSDF(world, deltas, p);
         Vec3 grad = {
-            EvaluateTotalSDF(world, deltas, { p.x + eps, p.y, p.z }) - d,
-            EvaluateTotalSDF(world, deltas, { p.x, p.y + eps, p.z }) - d,
-            EvaluateTotalSDF(world, deltas, { p.x, p.y, p.z + eps }) - d
+            EvaluateTotalSDF(world, deltas, { p.x + safeEps, p.y, p.z }) - d,
+            EvaluateTotalSDF(world, deltas, { p.x, p.y + safeEps, p.z }) - d,
+            EvaluateTotalSDF(world, deltas, { p.x, p.y, p.z + safeEps }) - d
         };
         return grad.Normalized();
     }
@@ -295,6 +341,10 @@ public:
         float hullRadius,
         float restitution = 0.3f
     ) {
+        if (!position.IsValid() || !velocity.IsValid() || hullRadius <= 0.0f) {
+            return false;
+        }
+
         float dist = EvaluateTotalSDF(world, deltas, position);
         if (dist < hullRadius) {
             Vec3 normal = ComputeNormal(world, deltas, position);
@@ -303,7 +353,8 @@ public:
 
             float vDotN = velocity.Dot(normal);
             if (vDotN < 0.0f) {
-                velocity = velocity - normal * ((1.0f + restitution) * vDotN);
+                float bounce = std::max(0.0f, std::min(1.0f, restitution));
+                velocity = velocity - normal * ((1.0f + bounce) * vDotN);
             }
             return true;
         }
@@ -319,10 +370,15 @@ public:
         int maxSteps = 128
     ) {
         RayHitResult result;
+        if (!origin.IsValid() || !direction.IsValid() || direction.LengthSq() < 1e-8f) {
+            return result;
+        }
+
         Vec3 dir = direction.Normalized();
         float t = 0.0f;
+        int safeSteps = std::max(1, std::min(maxSteps, 512));
 
-        for (int i = 0; i < maxSteps; ++i) {
+        for (int i = 0; i < safeSteps; ++i) {
             Vec3 p = origin + dir * t;
             float d = EvaluateTotalSDF(world, deltas, p);
             result.steps = i + 1;
@@ -334,13 +390,12 @@ public:
                 result.normal = ComputeNormal(world, deltas, p);
                 return result;
             }
-            t += d * 0.9f;
+            t += std::max(0.1f, d * 0.9f);
             if (t > maxDistance) break;
         }
         return result;
     }
 
-    // Пакетный LiDAR для автономных дронов (просчет сотен лучей за один вызов)
     static void RayCastBatch(
         const ISpatialWorld& world,
         const SpatialHashGrid& deltas,
@@ -351,8 +406,11 @@ public:
         uint8_t* outHits,
         size_t rayCount
     ) {
+        if (!origins || !directions || !outDistances || !outHits) return;
         for (size_t i = 0; i < rayCount; ++i) {
-            RayHitResult res = RayCast(world, deltas, origins[i], directions[i], maxDistance, 96);
+            RayHitResult res = RayCast(
+                world, deltas, origins[i], directions[i], maxDistance, 96
+            );
             outHits[i] = res.hit ? 1 : 0;
             outDistances[i] = res.hit ? res.distance : maxDistance;
         }
@@ -360,7 +418,7 @@ public:
 };
 
 // ============================================================================
-// 5. СЕТЕВОЙ ПРОТОКОЛ ВЫСОКОЙ ТОЧНОСТИ (256-BYTE ENTANGLED STATE PACKET)
+// 5. ЗАЩИЩЁННЫЙ СЕТЕВОЙ ПРОТОКОЛ ESN-256 С КОНТРОЛЬНОЙ СУММОЙ FNV-1A
 // ============================================================================
 
 struct alignas(64) ESNPacket256 {
@@ -378,12 +436,32 @@ struct alignas(64) ESNPacket256 {
     float t20 = 0.0f, t21 = 0.0f, t22 = 1.0f, t23 = 0.0f;
     float t30 = 0.0f, t31 = 0.0f, t32 = 0.0f, t33 = 1.0f;
 
-    uint64_t r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0;
+    uint64_t checksum = 0ULL;
+    uint64_t r1 = 0, r2 = 0, r3 = 0, r4 = 0;
     uint64_t r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0;
     uint64_t r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0;
     uint64_t r15 = 0, r16 = 0, r17 = 0, r18 = 0, r19 = 0;
 
-    bool IsValid() const { return magic == 0x45534E35; }
+    uint64_t ComputeChecksum() const {
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(this);
+        uint64_t hash = 0xCBF29CE484222325ULL;
+        for (size_t i = 0; i < 96; ++i) {
+            hash ^= static_cast<uint64_t>(raw[i]);
+            hash *= 0x100000001B3ULL;
+        }
+        return hash;
+    }
+
+    void Seal() {
+        checksum = ComputeChecksum();
+    }
+
+    bool IsValid() const {
+        if (magic != 0x45534E35) return false;
+        if (!IsSafeFloat(posX) || !IsSafeFloat(posY) || !IsSafeFloat(posZ)) return false;
+        if (!IsSafeFloat(temperatureK)) return false;
+        return checksum == ComputeChecksum();
+    }
 };
 static_assert(sizeof(ESNPacket256) == 256, "ESNPacket256 must be strictly 256 bytes");
 
@@ -398,10 +476,10 @@ public:
     static constexpr int LEAVES_PER_REGION = LEAF_BUCKETS / REGION_COUNT;
 
     HierarchicalHashRouter()
-        : m_leafHashes(LEAF_BUCKETS, 0ULL), m_regionHashes(REGION_COUNT, 0ULL) {}
+    : m_leafHashes(LEAF_BUCKETS, 0ULL), m_regionHashes(REGION_COUNT, 0ULL) {}
 
     void RebuildFromGrid(const SpatialHashGrid& grid) {
-        const Vec4* buf = grid.GetRawBuffer();
+                const Vec4* buf = grid.GetRawBuffer();
         uint64_t newRoot = 0ULL;
 
         for (int r = 0; r < REGION_COUNT; ++r) {
@@ -417,7 +495,9 @@ public:
                     const Vec4& op = buf[baseSlot + s];
                     if (op.w > 0.5f) {
                         uint64_t h = HashVec4(op);
-                        leafHash ^= (h + 0x9E3779B97F4A7C15ULL + (leafHash << 6) + (leafHash >> 2));
+                        leafHash ^= (
+                            h + 0x9E3779B97F4A7C15ULL + (leafHash << 6) + (leafHash >> 2)
+                        );
                     }
                 }
 
@@ -435,7 +515,9 @@ public:
 
     uint64_t GetGlobalRootHash() const { return m_globalRootHash; }
 
-    std::vector<int> FindDivergentRegions(const HierarchicalHashRouter& remoteRouter) const {
+    std::vector<int> FindDivergentRegions(
+        const HierarchicalHashRouter& remoteRouter
+    ) const {
         std::vector<int> dirtyRegions;
         if (m_globalRootHash == remoteRouter.m_globalRootHash) return dirtyRegions;
         for (int r = 0; r < REGION_COUNT; ++r) {

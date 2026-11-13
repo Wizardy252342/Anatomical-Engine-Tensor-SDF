@@ -1,0 +1,12 @@
+{
+    "world_name": "Grand Anatomical Continent",
+    "source_image": "disney.png",
+    "invert_heights": true,
+    "grid_chunks_x": 4,
+    "grid_chunks_z": 4,
+    "chunk_size_meters": 3000.0,
+    "max_height_meters": 650.0,
+    "rock_detail_strength": 16.0,
+    "contour_color_low": [0.1, 0.75, 1.0],
+    "contour_color_high": [1.0, 0.65, 0.2]
+}
