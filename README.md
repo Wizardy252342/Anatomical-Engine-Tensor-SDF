@@ -1,66 +1,74 @@
-# Anatomical Engine: Continuous Analytical Reality with Tensor SDF & Escher Matrices
+# Anatomical Engine (v9.0)
+**Dependency-Free C++17 Spatial SDF Engine, Spectral World Compiler & Headless CPU Raycaster**
 
-![Anatomical Engine Real-Time GPU Showcase](showcase_render.png)
+![Anatomical Engine Showcase](showcase_render.png)
 
-> **A novel computational paradigm replacing traditional polygon/voxel asset streaming and heavy network replication with a continuous, deterministic mathematical continuum.**
-
----
-
-## Overview & Paradigm Shift
-
-Modern large-scale space simulators and open-world engines (such as *StarEngine* or *Unreal Engine 5*) suffer from **informational materialism**—a bottleneck where scaling up virtual worlds requires a proportional explosion in storage footprints (I/O limits) and network bandwidth.
-
-**Anatomical Reality (AR)** shifts the architecture toward **Informational Potentialism**. Geometry, material density, gravity, and electromagnetic fields exist strictly as an uncollapsed mathematical potential. Space materializes into empirical surface data exclusively along the trajectory vectors of interaction (the observer's "looks") via GPU-accelerated Spherical Ray Marching.
-
-### Core Architectural Milestones
-
-1. **Planetary Scale Invariance (Nested Local Singularities):** Encodes a 30,000 km super-Earth alongside continuous 100-km subterranean cave networks within a static **1–100 GB footprint** on non-volatile media, eliminating floating-point vertex jitter without `float64` GPU overhead.
-2. **Controlled Escher Recursion:** Suppresses chaotic procedural fractals by gating high-frequency micro-details with an exponential distance-attenuation law ($\Gamma(\text{SDF})$). Micro-fissures and pores unwrap exclusively when the camera approaches a surface boundary ($|\text{SDF}| \to 0$).
-3. **Embedded Continuum Physics:** Integrates classical partial differential equations directly into the Signed Distance Field fabric:
-   - **Poisson Gravity:** Authentic gravitational shielding inside deep 100-km caverns.
-   - **Maxwellian Electrodynamics:** Analytical crustal ore magnetism causing real-time Lorentz thrust deflection and eddy-current sensor interference.
-   - **Navier-Cauchy Stress Tensors:** Physics-driven rock yielding and structural failure.
-4. **Entangled State Network (ESN):** Replaces legacy *Server Meshing* chunk replication with **64-byte Cache-Aligned Perturbation Vector Operators ($\Delta$)**. Clients and servers remain mathematically entangled via identical sparse directed hash-graphs, neutralizing network desync.
+**Anatomical Engine** is an experimental R&D spatial engine and procedural terrain pipeline built from scratch in **C++17, OpenGL 3.3, GLSL, HLSL, and Python**. It explores replacing heavy polygon meshes and gigabyte heightmap textures with compact 2D Fourier spectral harmonics, non-periodic $SO(3)$ Escher rotation matrices, and $O(1)$ spatial hash grids for real-time destructible worlds.
 
 ---
 
-## Hybrid Rendering Architecture (StarEngine / AAA Pipeline Integration)
+## Key Engineering Benchmarks
 
-A common misconception regarding pure Signed Distance Field (SDF) engines is the difficulty of modeling intricate, hard-surface man-made assets such as modular spacecraft, character rigging, or complex mechanical interiors. **Anatomical Engine** is explicitly designed as a **hybrid spatial and physics core** meant to augment—rather than replace—existing rasterization pipelines:
+| Subsystem | Metric / Performance | Technical Implementation |
+| :--- | :--- | :--- |
+| **Spectral World Compiler** | **927 : 1 Compression** (`5.49 MB` OBJ $\rightarrow$ `6.06 KB` `.acont`) | Extracts top-24 2D Fourier harmonics per sector from heightmaps/images (`world_compiler.py`) |
+| **Continent Streaming** | **12 × 12 km** seamless terrain at **100+ FPS** | Dynamic `3×3` active chunk window (`216` harmonics on GPU) with `[R]` Hot-Reload |
+| **Headless CPU Raycaster** | **~2.98 Million rays/sec** (Single-process C-API) | Pure C++17 analytical sphere-tracing (`AnatomicalCore.hpp`) decoupled from GPU |
+| **Destructible Voxel-Free Grid** | **$O(1)$ Spatial Lookup** (Zero boundary seams) | 3D `SpatialHashGrid` with `3×3×3` cross-cell Halo Insertion |
+| **Network State Sync** | **0 Bytes/sec** idle traffic / **256-Byte** edit packets | 3-tier `HierarchicalHashRouter` (Merkle tree) + FNV-1a checksummed `ESNPacket256` |
 
-* **Macro-Scale & Subterranean Pass (Tensor SDF):** Planetary bodies (30,000+ km), 100-km subterranean cave networks, destructible terrain, and volumetric atmospheric/magnetic fields are evaluated via GPU Spherical Ray Marching on Compute Shaders and Tensor Cores.
-* **Dynamic Entity Pass (Standard Mesh / Rasterization):** Spacecraft, characters, and intricate architectural modules are rendered via traditional hardware rasterization or mesh shaders.
-* **Unified Depth Buffer & Physics Coupling:** Both passes share a unified hardware depth buffer (`Z-Buffer`) for seamless visual occlusion. Simultaneously, dynamic mesh entities query the underlying SDF continuum at their bounding vertices to receive real-time collision responses, Poisson gravitational shielding, and Lorentz electromagnetic thrust deflections without heavy mesh-to-mesh collision overhead.
+---
 
-## Interactive GPU Proof-of-Concept (`src/main.cpp`)
+## Core Architecture & Modules
 
-This repository includes a lightweight, zero-bloat C++17 / OpenGL 3.3 real-time sandbox demonstrating the core shader pipeline:
-- **Spherical Ray Marching** through an inverted analytical 100-km cavern spline.
-- **Real-time Maxwellian magnetic flux visualization** across rock strata.
-- **Interactive 64-byte $\Delta$-Operator Cratering:** Left-click anywhere on the cavern walls to dispatch a simulated network perturbation packet and dynamically carve a glowing impact crater into the SDF continuum at 60+ FPS.
+### 1. Header-Only C++17 Core (`AnatomicalCore.hpp`)
+* **Zero External Dependencies:** Pure standard C++17 (`<cmath>`, `<vector>`, `<cstdint>`) with strict `NaN`/`Inf` and zero-division guards.
+* **Analytical SDF & Smooth CSG:** Primitives (Spheres, Boxes, Gyroids), polynomial smooth unions/subtractions, and non-periodic $SO(3)$ orthogonal rotation matrices for rock micro-detail.
+* **Seamless `SpatialHashGrid`:** Stores real-time boolean craters across 500m cells using `3×3×3` neighborhood Halo Insertion to eliminate chunk-border artifacts.
+* **Deterministic Network & Merkle Router:** `ESNPacket256` with FNV-1a integrity verification paired with a 256-region Merkle hash tree (`uint64_t` root state verification).
 
-### Controls
-- **`W` `A` `S` `D`** — Free-flight navigation through the subterranean tunnel.
-- **`Left Shift`** — Thruster afterburner (3.5x velocity boost).
-- **`Mouse`** — 360-degree camera orientation.
-- **`Left Mouse Button (LMB)`** — Dispatch 64-byte Perturbation Vector Operator (carve impact crater).
-- **`ESC`** — Exit simulation.
+### 2. Spectral World Compiler & Mesher (`world_compiler.py` & `continent_to_obj.py`)
+* **Recipe-Driven Pipeline (`world_recipe.json`):** Slices large heightfields or images into chunk grids, compresses each sector into 24 spectral harmonics, and packs them into a binary `.acont` atlas.
+* **Industry Interoperability (`continent_to_obj.py`):** Reconstructs any `.acont` binary world into a standard Wavefront `.obj` triangle mesh with smooth vertex normals and UVs for **Blender**, **Unreal Engine 5**, or **Unity**.
 
-### Quick Build Instructions (Windows / MinGW-w64)
-Ensure `GLFW` and `GLAD` headers/libraries are placed in `include/` and `lib/`, then compile via:
+### 3. Headless AI / RL Bridge (`AnatomicalCAPI.cpp` & `ai_agent_bridge.py`)
+* Exposes an `extern "C"` ABI (`AnatomicalCore.dll`) allowing Python reinforcement learning agents, autonomous drones, or game servers to run batch LiDAR raycasts and SDF collision queries without a GPU.
+
+### 4. Interactive GPU Sandbox (`main.cpp`)
+* Real-time OpenGL 3.3 dual-pass raymarcher featuring planetary-scale horizons, 105 km underground gyroid caverns, secondary reflections on liquid metal oceans, procedural audio synthesis, and UDP loopback multiplayer.
+
+---
+
+## Quick Start & Verification
+
+### 1. Run Automated Safety & Integrity Unit Tests
 ```bash
-g++ -O3 src/main.cpp glad.c -Iinclude -Llib -lglfw3 -lopengl32 -lgdi32 -o anatomical_sandbox.exe
+g++ -O3 -std=c++17 run_tests.cpp -o run_tests.exe
+./run_tests.exe
+```
+*Verifies `NaN`/`Inf` rejection, cross-cell Halo Insertion continuity, FNV-1a packet tamper detection, and analytical raycast precision.*
+
+### 2. Compile a Spectral Continent & Export to `.OBJ`
+```bash
+pip install pillow
+python world_compiler.py world_recipe.json
+python continent_to_obj.py compiled_continent.acont continent_export.obj
 ```
 
+### 3. Build the Interactive GPU Sandbox (Windows / MinGW)
+```bash
+g++ -O3 -std=c++17 main.cpp glad.c -Iinclude -Llib -lglfw3 -lopengl32 -lgdi32 -lws2_32 -lwinmm -o anatomical_sandbox.exe
+./anatomical_sandbox.exe
+```
+*Controls: `WASD` Move | `Mouse` Look | `LMB` Carve Crater | `M` Toggle Surface/Caverns | `R` Hot-Reload `.acont` World*
+
 ---
 
-## Whitepaper & Intellectual Property
-
-The complete 18-page mathematical formulation—covering Lipschitz-bounded step stabilization, GPU Tensor Core (`FP8`/`FP4`) matrix quantization, and deterministic topological entropy—is available in this repository (`Anatomical_Engine_Whitepaper.pdf`) and archived on **ai.viXra.org** (Submission `#18424024`).
-
-**License & Commercial Inquiries:**  
-The architectural concepts, mathematical formulations, and whitepaper are protected under the **Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0)** license.  
-
-For commercial licensing, R&D consulting, or core engine integration inquiries, please contact the author directly:
-- **Author:** Vadim Efremov (Independent Engine R&D Architect)
-- **Email:** ve807377@gmail.com
+## Repository Structure
+* `AnatomicalCore.hpp` — Production-hardened C++17 spatial math, SDF, hash grid, physics, and Merkle router core.
+* `run_tests.cpp` — Automated unit & integrity test suite.
+* `main.cpp` — Interactive OpenGL 3.3 raymarching sandbox with `3×3` chunk streaming and UDP sync.
+* `world_compiler.py` / `world_recipe.json` — 2D Fourier spectral terrain compiler.
+* `continent_to_obj.py` — Wavefront `.OBJ` mesh exporter for Blender / UE5.
+* `AnatomicalCAPI.cpp` / `ai_agent_bridge.py` — Native C-API and Python bridge for headless CPU raycasting.
+* `AnatomicalUE5Component.h` / `AnatomicalUE5_Raymarch.hlsl` — Unreal Engine 5 integration adapter.
