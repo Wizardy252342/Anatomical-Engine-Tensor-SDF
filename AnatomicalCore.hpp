@@ -9,25 +9,36 @@
 namespace Anatomical {
 
 // ============================================================================
-// 1. БАЗОВАЯ ЛИНЕЙНАЯ АЛГЕБРА И МАТРИЧНЫЕ ОПЕРАТОРЫ
+// 1. БЕЗОПАСНАЯ ЛИНЕЙНАЯ АЛГЕБРА И ПРОВЕРКА КОНЕЧНОСТИ ДАННЫХ (NAN/INF GUARD)
 // ============================================================================
+
+inline bool IsSafeFloat(float v) {
+    return std::isfinite(v);
+}
 
 struct Vec3 {
     float x = 0.0f;
     float y = 0.0f;
     float z = 0.0f;
 
+    bool IsValid() const {
+        return IsSafeFloat(x) && IsSafeFloat(y) && IsSafeFloat(z);
+    }
+
     Vec3 operator+(const Vec3& r) const { return { x + r.x, y + r.y, z + r.z }; }
     Vec3 operator-(const Vec3& r) const { return { x - r.x, y - r.y, z - r.z }; }
     Vec3 operator*(float s) const { return { x * s, y * s, z * s }; }
-    Vec3 operator/(float s) const { return { x / s, y / s, z / s }; }
+    Vec3 operator/(float s) const {
+        if (!IsSafeFloat(s) || std::abs(s) < 1e-8f) return { 0.0f, 0.0f, 0.0f };
+        return { x / s, y / s, z / s };
+    }
 
     float Dot(const Vec3& r) const { return x * r.x + y * r.y + z * r.z; }
     Vec3 Cross(const Vec3& r) const {
         return { y * r.z - z * r.y, z * r.x - x * r.z, x * r.y - y * r.x };
     }
     float LengthSq() const { return x * x + y * y + z * z; }
-    float Length() const { return std::sqrt(LengthSq()); }
+    float Length() const { return std::sqrt(std::max(0.0f, LengthSq())); }
     Vec3 Normalized() const {
         float l = Length();
         return (l > 1e-6f) ? (*this / l) : Vec3{ 0.0f, 0.0f, 0.0f };
@@ -54,7 +65,6 @@ struct Mat3 {
         };
     }
 
-    // Ортогональная матрица SO(3) для апериодических октав деталей
     static Mat3 OrthogonalEscherSO3() {
         return {
              0.36f,  0.48f, -0.80f,
@@ -65,19 +75,19 @@ struct Mat3 {
 };
 
 // ============================================================================
-// 2. АНАЛИТИЧЕСКИЕ ОПЕРАТОРЫ ПОЛЯ РАССТОЯНИЙ (SDF PRIMITIVES & CSG)
+// 2. АНАЛИТИЧЕСКИЕ ПРИМИТИВЫ И ГЛАДКИЕ БУЛЕВЫ ОПЕРАТОРЫ
 // ============================================================================
 
 namespace SDF {
     inline float Sphere(const Vec3& p, const Vec3& center, float radius) {
-        return (p - center).Length() - radius;
+        return (p - center).Length() - std::max(0.0f, radius);
     }
 
     inline float Box(const Vec3& p, const Vec3& center, const Vec3& halfExtents) {
         Vec3 q = {
-            std::abs(p.x - center.x) - halfExtents.x,
-            std::abs(p.y - center.y) - halfExtents.y,
-            std::abs(p.z - center.z) - halfExtents.z
+            std::abs(p.x - center.x) - std::max(0.0f, halfExtents.x),
+            std::abs(p.y - center.y) - std::max(0.0f, halfExtents.y),
+            std::abs(p.z - center.z) - std::max(0.0f, halfExtents.z)
         };
         Vec3 qMax = { std::max(q.x, 0.0f), std::max(q.y, 0.0f), std::max(q.z, 0.0f) };
         float inside = std::min(std::max(q.x, std::max(q.y, q.z)), 0.0f);
@@ -85,25 +95,26 @@ namespace SDF {
     }
 
     inline float Gyroid(const Vec3& p, float scale) {
-        Vec3 g = p * scale;
+        float safeScale = (std::abs(scale) < 1e-6f) ? 1e-6f : scale;
+        Vec3 g = p * safeScale;
         float d = std::sin(g.x) * std::cos(g.y) +
                   std::sin(g.y) * std::cos(g.z) +
                   std::sin(g.z) * std::cos(g.x);
-        return std::abs(d) / scale;
+        return std::abs(d) / safeScale;
     }
 
-    // Гладкое объединение и вычитание (Smooth CSG)
     inline float SmoothUnion(float d1, float d2, float k) {
-        float h = std::max(k - std::abs(d1 - d2), 0.0f) / k;
-        return std::min(d1, d2) - h * h * k * 0.25f;
+        float safeK = std::max(1e-5f, k);
+        float h = std::max(safeK - std::abs(d1 - d2), 0.0f) / safeK;
+        return std::min(d1, d2) - h * h * safeK * 0.25f;
     }
 
     inline float SmoothSubtract(float d1, float d2, float k) {
-        float h = std::max(k - std::abs(-d1 - d2), 0.0f) / k;
-        return std::max(d1, -d2) + h * h * k * 0.25f;
+        float safeK = std::max(1e-5f, k);
+        float h = std::max(safeK - std::abs(-d1 - d2), 0.0f) / safeK;
+        return std::max(d1, -d2) + h * h * safeK * 0.25f;
     }
 
-    // Апериодический шум Эшера с затуханием от границы поверхности (|SDF| -> 0)
     inline float EscherMicroDetail(const Vec3& p, float baseSDF, float amplitude, float freq) {
         float damping = std::exp(-0.00008f * baseSDF * baseSDF);
         if (damping < 0.001f) return 0.0f;
@@ -118,16 +129,23 @@ namespace SDF {
 }
 
 // ============================================================================
-// 3. ПРОСТРАНСТВЕННАЯ ХЕШ-ТАБЛИЦА O(1) ДЛЯ ДИНАМИЧЕСКИХ ОПЕРАТОРОВ ДЕЛЬТ
+// 3. ОТКАЗОУСТОЙЧИВАЯ ПРОСТРАНСТВЕННАЯ ХЕШ-ТАБЛИЦА O(1) (HALO INSERTION)
 // ============================================================================
 
 struct PerturbationOperator {
     Vec3 position;
-    float radius;
-    float intensity;
-    float timestamp;
-    float temperatureK;
-    Vec3 anisotropy;
+    float radius = 115.0f;
+    float intensity = 230.0f;
+    float timestamp = 0.0f;
+    float temperatureK = 2800.0f;
+    Vec3 anisotropy = { 1.15f, 0.92f, 1.08f };
+
+    bool IsValid() const {
+        return position.IsValid() &&
+               IsSafeFloat(radius) && radius > 0.0f &&
+               IsSafeFloat(intensity) &&
+               IsSafeFloat(timestamp) && timestamp >= 0.0f;
+    }
 };
 
 class SpatialHashGrid {
@@ -136,24 +154,41 @@ public:
     static constexpr int SLOTS_PER_BUCKET = 4;
 
     explicit SpatialHashGrid(float cellSize = 500.0f)
-        : m_cellSize(cellSize), m_gpuBuffer(BUCKETS * SLOTS_PER_BUCKET, { 0.0f, 0.0f, 0.0f, 0.0f }) {}
+        : m_cellSize(std::max(1.0f, IsSafeFloat(cellSize) ? cellSize : 500.0f)),
+          m_gpuBuffer(BUCKETS * SLOTS_PER_BUCKET, { 0.0f, 0.0f, 0.0f, 0.0f }) {}
 
-    void InsertOperator(const PerturbationOperator& op) {
-        int cx = static_cast<int>(std::floor(op.position.x / m_cellSize));
-        int cy = static_cast<int>(std::floor(op.position.y / m_cellSize));
-        int cz = static_cast<int>(std::floor(op.position.z / m_cellSize));
-        uint32_t bucket = ComputeHash(cx, cy, cz);
+    bool InsertOperator(const PerturbationOperator& op) {
+        if (!op.IsValid()) return false;
 
-        int baseIdx = static_cast<int>(bucket) * SLOTS_PER_BUCKET;
-        for (int i = SLOTS_PER_BUCKET - 1; i > 0; --i) {
-            m_gpuBuffer.at(baseIdx + i) = m_gpuBuffer.at(baseIdx + i - 1);
+        // Ограничиваем радиус ореола, чтобы один оператор не забил всю таблицу
+        float influenceRadius = std::min(op.radius * 3.5f, m_cellSize * 0.48f);
+
+        int centerX = static_cast<int>(std::floor(op.position.x / m_cellSize));
+        int centerY = static_cast<int>(std::floor(op.position.y / m_cellSize));
+        int centerZ = static_cast<int>(std::floor(op.position.z / m_cellSize));
+
+        int minX = std::max(centerX - 1, static_cast<int>(std::floor((op.position.x - influenceRadius) / m_cellSize)));
+        int maxX = std::min(centerX + 1, static_cast<int>(std::floor((op.position.x + influenceRadius) / m_cellSize)));
+        int minY = std::max(centerY - 1, static_cast<int>(std::floor((op.position.y - influenceRadius) / m_cellSize)));
+        int maxY = std::min(centerY + 1, static_cast<int>(std::floor((op.position.y + influenceRadius) / m_cellSize)));
+        int minZ = std::max(centerZ - 1, static_cast<int>(std::floor((op.position.z - influenceRadius) / m_cellSize)));
+        int maxZ = std::min(centerZ + 1, static_cast<int>(std::floor((op.position.z + influenceRadius) / m_cellSize)));
+
+        for (int cz = minZ; cz <= maxZ; ++cz) {
+            for (int cy = minY; cy <= maxY; ++cy) {
+                for (int cx = minX; cx <= maxX; ++cx) {
+                    InsertIntoSingleBucket(cx, cy, cz, op);
+                }
+            }
         }
-        m_gpuBuffer.at(baseIdx) = { op.position.x, op.position.y, op.position.z, op.timestamp + 1.0f };
         m_totalCount++;
         m_dirty = true;
+        return true;
     }
 
     float EvaluateDeltaAt(const Vec3& p, float defaultRadius = 115.0f, float defaultDepth = 230.0f) const {
+        if (!p.IsValid()) return 0.0f;
+
         int cx = static_cast<int>(std::floor(p.x / m_cellSize));
         int cy = static_cast<int>(std::floor(p.y / m_cellSize));
         int cz = static_cast<int>(std::floor(p.z / m_cellSize));
@@ -161,16 +196,26 @@ public:
         int baseIdx = static_cast<int>(bucket) * SLOTS_PER_BUCKET;
 
         float totalDelta = 0.0f;
-        float maxRange = defaultRadius * 4.0f;
+        float safeRadius = std::max(1.0f, defaultRadius);
+        float maxRange = safeRadius * 4.0f;
         float maxRangeSq = maxRange * maxRange;
 
         for (int i = 0; i < SLOTS_PER_BUCKET; ++i) {
             const Vec4& c = m_gpuBuffer.at(baseIdx + i);
             if (c.w > 0.5f) {
-                Vec3 diff = { p.x - c.x, p.y - c.y, p.z - c.z };
+                Vec3 diff = {
+                    (p.x - c.x) * 1.15f,
+                    (p.y - c.y) * 0.92f,
+                    (p.z - c.z) * 1.08f
+                };
                 float distSq = diff.LengthSq();
                 if (distSq < maxRangeSq) {
-                    totalDelta += defaultDepth * std::exp(-distSq / (2.0f * defaultRadius * defaultRadius));
+                    float dist = std::sqrt(distSq);
+                    float rNorm = dist / safeRadius;
+                    float bowl = defaultDepth * std::exp(-0.5f * rNorm * rNorm);
+                    float rimTerm = (dist - safeRadius * 2.08f) / (safeRadius * 0.48f);
+                    float rim = -45.0f * std::exp(-0.5f * rimTerm * rimTerm);
+                    totalDelta += (bowl + rim);
                 }
             }
         }
@@ -183,7 +228,6 @@ public:
         m_dirty = true;
     }
 
-    // Прямой доступ к выровненному буферу для загрузки в GPU (GL_TEXTURE_BUFFER / SSBO)
     const Vec4* GetRawBuffer() const { return m_gpuBuffer.data(); }
     size_t GetBufferByteSize() const { return m_gpuBuffer.size() * sizeof(Vec4); }
     int GetActiveCount() const { return m_totalCount; }
@@ -196,6 +240,33 @@ private:
     int m_totalCount = 0;
     bool m_dirty = true;
 
+        void InsertIntoSingleBucket(
+        int cx, int cy, int cz, const PerturbationOperator& op
+    ) {
+        uint32_t bucket = ComputeHash(cx, cy, cz);
+        int baseIdx = static_cast<int>(bucket) * SLOTS_PER_BUCKET;
+
+        for (int i = 0; i < SLOTS_PER_BUCKET; ++i) {
+            const Vec4& existing = m_gpuBuffer.at(baseIdx + i);
+            if (existing.w > 0.5f) {
+                float dx = existing.x - op.position.x;
+                float dy = existing.y - op.position.y;
+                float dz = existing.z - op.position.z;
+                if ((dx * dx + dy * dy + dz * dz) < 1.0f) {
+                    m_gpuBuffer.at(baseIdx + i).w = op.timestamp + 1.0f;
+                    return;
+                }
+            }
+        }
+
+        for (int i = SLOTS_PER_BUCKET - 1; i > 0; --i) {
+            m_gpuBuffer.at(baseIdx + i) = m_gpuBuffer.at(baseIdx + i - 1);
+        }
+        m_gpuBuffer.at(baseIdx) = { 
+            op.position.x, op.position.y, op.position.z, op.timestamp + 1.0f 
+        };
+    }
+
     static uint32_t ComputeHash(int ix, int iy, int iz) {
         uint32_t ux = static_cast<uint32_t>(ix + 100000);
         uint32_t uy = static_cast<uint32_t>(iy + 100000);
@@ -206,7 +277,7 @@ private:
 };
 
 // ============================================================================
-// 4. АБСТРАКТНЫЙ ИНТЕРФЕЙС МИРА И ФИЗИЧЕСКИЙ / БАЛЛИСТИЧЕСКИЙ РЕШАТЕЛЬ
+// 4. ФИЗИЧЕСКИЙ И ПАКЕТНЫЙ ЛИДАР-РЕШАТЕЛЬ
 // ============================================================================
 
 class ISpatialWorld {
@@ -225,21 +296,43 @@ struct RayHitResult {
 
 class FieldPhysicsSolver {
 public:
-    static float EvaluateTotalSDF(const ISpatialWorld& world, const SpatialHashGrid& deltas, const Vec3& p) {
+    static float EvaluateTotalSDF(
+        const ISpatialWorld& world, const SpatialHashGrid& deltas, const Vec3& p
+    ) {
+        if (!p.IsValid()) return 0.0f;
         return world.EvaluateBaseSDF(p) + deltas.EvaluateDeltaAt(p);
     }
 
-    static Vec3 ComputeNormal(const ISpatialWorld& world, const SpatialHashGrid& deltas, const Vec3& p, float eps = 0.5f) {
+    static void EvaluateBatchSDF(
+        const ISpatialWorld& world,
+        const SpatialHashGrid& deltas,
+        const Vec3* points,
+        float* outDistances,
+        size_t count
+    ) {
+        if (!points || !outDistances) return;
+        for (size_t i = 0; i < count; ++i) {
+            outDistances[i] = EvaluateTotalSDF(world, deltas, points[i]);
+        }
+    }
+
+    static Vec3 ComputeNormal(
+        const ISpatialWorld& world, 
+        const SpatialHashGrid& deltas, 
+        const Vec3& p, 
+        float eps = 0.5f
+    ) {
+        if (!p.IsValid()) return { 0.0f, 1.0f, 0.0f };
+        float safeEps = std::max(0.01f, eps);
         float d = EvaluateTotalSDF(world, deltas, p);
         Vec3 grad = {
-            EvaluateTotalSDF(world, deltas, { p.x + eps, p.y, p.z }) - d,
-            EvaluateTotalSDF(world, deltas, { p.x, p.y + eps, p.z }) - d,
-            EvaluateTotalSDF(world, deltas, { p.x, p.y, p.z + eps }) - d
+            EvaluateTotalSDF(world, deltas, { p.x + safeEps, p.y, p.z }) - d,
+            EvaluateTotalSDF(world, deltas, { p.x, p.y + safeEps, p.z }) - d,
+            EvaluateTotalSDF(world, deltas, { p.x, p.y, p.z + safeEps }) - d
         };
         return grad.Normalized();
     }
 
-    // Разрешение коллизий твёрдого тела со стенками поля без треугольников
     static bool ResolveSphereCollision(
         const ISpatialWorld& world,
         const SpatialHashGrid& deltas,
@@ -248,6 +341,10 @@ public:
         float hullRadius,
         float restitution = 0.3f
     ) {
+        if (!position.IsValid() || !velocity.IsValid() || hullRadius <= 0.0f) {
+            return false;
+        }
+
         float dist = EvaluateTotalSDF(world, deltas, position);
         if (dist < hullRadius) {
             Vec3 normal = ComputeNormal(world, deltas, position);
@@ -256,14 +353,14 @@ public:
 
             float vDotN = velocity.Dot(normal);
             if (vDotN < 0.0f) {
-                velocity = velocity - normal * ((1.0f + restitution) * vDotN);
+                float bounce = std::max(0.0f, std::min(1.0f, restitution));
+                velocity = velocity - normal * ((1.0f + bounce) * vDotN);
             }
             return true;
         }
         return false;
     }
 
-    // Серверная / ИИ трассировка луча без использования GPU (для баллистики и LiDAR)
     static RayHitResult RayCast(
         const ISpatialWorld& world,
         const SpatialHashGrid& deltas,
@@ -272,11 +369,16 @@ public:
         float maxDistance = 50000.0f,
         int maxSteps = 128
     ) {
-                RayHitResult result;
+        RayHitResult result;
+        if (!origin.IsValid() || !direction.IsValid() || direction.LengthSq() < 1e-8f) {
+            return result;
+        }
+
         Vec3 dir = direction.Normalized();
         float t = 0.0f;
+        int safeSteps = std::max(1, std::min(maxSteps, 512));
 
-        for (int i = 0; i < maxSteps; ++i) {
+        for (int i = 0; i < safeSteps; ++i) {
             Vec3 p = origin + dir * t;
             float d = EvaluateTotalSDF(world, deltas, p);
             result.steps = i + 1;
@@ -288,19 +390,39 @@ public:
                 result.normal = ComputeNormal(world, deltas, p);
                 return result;
             }
-            t += d * 0.9f;
+            t += std::max(0.1f, d * 0.9f);
             if (t > maxDistance) break;
         }
         return result;
     }
+
+    static void RayCastBatch(
+        const ISpatialWorld& world,
+        const SpatialHashGrid& deltas,
+        const Vec3* origins,
+        const Vec3* directions,
+        float maxDistance,
+        float* outDistances,
+        uint8_t* outHits,
+        size_t rayCount
+    ) {
+        if (!origins || !directions || !outDistances || !outHits) return;
+        for (size_t i = 0; i < rayCount; ++i) {
+            RayHitResult res = RayCast(
+                world, deltas, origins[i], directions[i], maxDistance, 96
+            );
+            outHits[i] = res.hit ? 1 : 0;
+            outDistances[i] = res.hit ? res.distance : maxDistance;
+        }
+    }
 };
 
 // ============================================================================
-// 5. СЕТЕВОЙ ПРОТОКОЛ ВЫСОКОЙ ТОЧНОСТИ (256-BYTE ENTANGLED STATE PACKET)
+// 5. ЗАЩИЩЁННЫЙ СЕТЕВОЙ ПРОТОКОЛ ESN-256 С КОНТРОЛЬНОЙ СУММОЙ FNV-1A
 // ============================================================================
 
 struct alignas(64) ESNPacket256 {
-    uint32_t magic = 0x45534E35; // 'ESN5'
+    uint32_t magic = 0x45534E35;
     uint32_t senderId = 0;
     uint32_t opType = 0;
     uint32_t seed = 0;
@@ -309,43 +431,59 @@ struct alignas(64) ESNPacket256 {
     float posZ = 0.0f;
     float temperatureK = 0.0f;
 
-    // 16 коэффициентов матрицы тензорной деформации (64 байта)
     float t00 = 1.0f, t01 = 0.0f, t02 = 0.0f, t03 = 0.0f;
     float t10 = 0.0f, t11 = 1.0f, t12 = 0.0f, t13 = 0.0f;
     float t20 = 0.0f, t21 = 0.0f, t22 = 1.0f, t23 = 0.0f;
     float t30 = 0.0f, t31 = 0.0f, t32 = 0.0f, t33 = 1.0f;
 
-    // Расширенный резерв тензорных гармоник (160 байт -> итого ровно 256 байт)
-    uint64_t r0 = 0, r1 = 0, r2 = 0, r3 = 0, r4 = 0;
+    uint64_t checksum = 0ULL;
+    uint64_t r1 = 0, r2 = 0, r3 = 0, r4 = 0;
     uint64_t r5 = 0, r6 = 0, r7 = 0, r8 = 0, r9 = 0;
     uint64_t r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0;
     uint64_t r15 = 0, r16 = 0, r17 = 0, r18 = 0, r19 = 0;
 
-    bool IsValid() const { return magic == 0x45534E35; }
+    uint64_t ComputeChecksum() const {
+        const uint8_t* raw = reinterpret_cast<const uint8_t*>(this);
+        uint64_t hash = 0xCBF29CE484222325ULL;
+        for (size_t i = 0; i < 96; ++i) {
+            hash ^= static_cast<uint64_t>(raw[i]);
+            hash *= 0x100000001B3ULL;
+        }
+        return hash;
+    }
+
+    void Seal() {
+        checksum = ComputeChecksum();
+    }
+
+    bool IsValid() const {
+        if (magic != 0x45534E35) return false;
+        if (!IsSafeFloat(posX) || !IsSafeFloat(posY) || !IsSafeFloat(posZ)) return false;
+        if (!IsSafeFloat(temperatureK)) return false;
+        return checksum == ComputeChecksum();
+    }
 };
 static_assert(sizeof(ESNPacket256) == 256, "ESNPacket256 must be strictly 256 bytes");
 
 // ============================================================================
 // 6. ФРАКТАЛЬНЫЙ РОУТЕР СОСТОЯНИЙ (HIERARCHICAL MERKLE-HASH ROUTER)
-//    Связывает ИИ-агентов в центре с распределёнными игровыми движками
 // ============================================================================
 
 class HierarchicalHashRouter {
 public:
-    static constexpr int LEAF_BUCKETS = SpatialHashGrid::BUCKETS; // 16384
-    static constexpr int REGION_COUNT = 256;                      // 256 регионов (по 64 листа)
+    static constexpr int LEAF_BUCKETS = SpatialHashGrid::BUCKETS;
+    static constexpr int REGION_COUNT = 256;
     static constexpr int LEAVES_PER_REGION = LEAF_BUCKETS / REGION_COUNT;
 
     HierarchicalHashRouter()
-        : m_leafHashes(LEAF_BUCKETS, 0ULL), m_regionHashes(REGION_COUNT, 0ULL) {}
+    : m_leafHashes(LEAF_BUCKETS, 0ULL), m_regionHashes(REGION_COUNT, 0ULL) {}
 
-    // Пересчитывает иерархическое дерево хешей на основе буфера SpatialHashGrid
     void RebuildFromGrid(const SpatialHashGrid& grid) {
-        const Vec4* buf = grid.GetRawBuffer();
+                const Vec4* buf = grid.GetRawBuffer();
         uint64_t newRoot = 0ULL;
 
         for (int r = 0; r < REGION_COUNT; ++r) {
-            uint64_t regHash = 0xCBF29CE484222325ULL; // FNV-1a offset basis
+            uint64_t regHash = 0xCBF29CE484222325ULL;
             int startLeaf = r * LEAVES_PER_REGION;
 
             for (int l = 0; l < LEAVES_PER_REGION; ++l) {
@@ -357,7 +495,9 @@ public:
                     const Vec4& op = buf[baseSlot + s];
                     if (op.w > 0.5f) {
                         uint64_t h = HashVec4(op);
-                        leafHash ^= (h + 0x9E3779B97F4A7C15ULL + (leafHash << 6) + (leafHash >> 2));
+                        leafHash ^= (
+                            h + 0x9E3779B97F4A7C15ULL + (leafHash << 6) + (leafHash >> 2)
+                        );
                     }
                 }
 
@@ -373,36 +513,19 @@ public:
         m_globalRootHash = newRoot;
     }
 
-    // Единый 64-битный хеш состояния всей планеты (0 байт трафика при совпадении)
     uint64_t GetGlobalRootHash() const { return m_globalRootHash; }
 
-    // Быстрая проверка расхождений между ИИ-агентом и клиентским движком
-    std::vector<int> FindDivergentRegions(const HierarchicalHashRouter& remoteRouter) const {
+    std::vector<int> FindDivergentRegions(
+        const HierarchicalHashRouter& remoteRouter
+    ) const {
         std::vector<int> dirtyRegions;
-        if (m_globalRootHash == remoteRouter.m_globalRootHash) {
-            return dirtyRegions;
-        }
+        if (m_globalRootHash == remoteRouter.m_globalRootHash) return dirtyRegions;
         for (int r = 0; r < REGION_COUNT; ++r) {
             if (m_regionHashes.at(r) != remoteRouter.m_regionHashes.at(r)) {
                 dirtyRegions.push_back(r);
             }
         }
         return dirtyRegions;
-    }
-
-    // Возвращает индексы конкретных 500-метровых ячеек внутри региона для точечной докачки
-    std::vector<int> FindDivergentLeaves(int regionIndex, const HierarchicalHashRouter& remoteRouter) const {
-        std::vector<int> dirtyLeaves;
-        if (regionIndex < 0 || regionIndex >= REGION_COUNT) return dirtyLeaves;
-
-        int startLeaf = regionIndex * LEAVES_PER_REGION;
-        for (int l = 0; l < LEAVES_PER_REGION; ++l) {
-            int idx = startLeaf + l;
-            if (m_leafHashes.at(idx) != remoteRouter.m_leafHashes.at(idx)) {
-                dirtyLeaves.push_back(idx);
-            }
-        }
-        return dirtyLeaves;
     }
 
 private:
@@ -421,4 +544,5 @@ private:
         return a ^ (b * 0x9E3779B97F4A7C15ULL);
     }
 };
+
 } // namespace Anatomical
