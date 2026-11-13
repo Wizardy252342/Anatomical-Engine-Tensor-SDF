@@ -325,4 +325,100 @@ struct alignas(64) ESNPacket256 {
 };
 static_assert(sizeof(ESNPacket256) == 256, "ESNPacket256 must be strictly 256 bytes");
 
+// ============================================================================
+// 6. ФРАКТАЛЬНЫЙ РОУТЕР СОСТОЯНИЙ (HIERARCHICAL MERKLE-HASH ROUTER)
+//    Связывает ИИ-агентов в центре с распределёнными игровыми движками
+// ============================================================================
+
+class HierarchicalHashRouter {
+public:
+    static constexpr int LEAF_BUCKETS = SpatialHashGrid::BUCKETS; // 16384
+    static constexpr int REGION_COUNT = 256;                      // 256 регионов (по 64 листа)
+    static constexpr int LEAVES_PER_REGION = LEAF_BUCKETS / REGION_COUNT;
+
+    HierarchicalHashRouter()
+        : m_leafHashes(LEAF_BUCKETS, 0ULL), m_regionHashes(REGION_COUNT, 0ULL) {}
+
+    // Пересчитывает иерархическое дерево хешей на основе буфера SpatialHashGrid
+    void RebuildFromGrid(const SpatialHashGrid& grid) {
+        const Vec4* buf = grid.GetRawBuffer();
+        uint64_t newRoot = 0ULL;
+
+        for (int r = 0; r < REGION_COUNT; ++r) {
+            uint64_t regHash = 0xCBF29CE484222325ULL; // FNV-1a offset basis
+            int startLeaf = r * LEAVES_PER_REGION;
+
+            for (int l = 0; l < LEAVES_PER_REGION; ++l) {
+                int leafIdx = startLeaf + l;
+                int baseSlot = leafIdx * SpatialHashGrid::SLOTS_PER_BUCKET;
+                uint64_t leafHash = 0ULL;
+
+                for (int s = 0; s < SpatialHashGrid::SLOTS_PER_BUCKET; ++s) {
+                    const Vec4& op = buf[baseSlot + s];
+                    if (op.w > 0.5f) {
+                        uint64_t h = HashVec4(op);
+                        leafHash ^= (h + 0x9E3779B97F4A7C15ULL + (leafHash << 6) + (leafHash >> 2));
+                    }
+                }
+
+                m_leafHashes.at(leafIdx) = leafHash;
+                regHash ^= leafHash;
+                regHash *= 0x100000001B3ULL;
+            }
+
+            m_regionHashes.at(r) = regHash;
+            newRoot ^= (regHash + static_cast<uint64_t>(r) * 0x517CC1B727220A95ULL);
+        }
+
+        m_globalRootHash = newRoot;
+    }
+
+    // Единый 64-битный хеш состояния всей планеты (0 байт трафика при совпадении)
+    uint64_t GetGlobalRootHash() const { return m_globalRootHash; }
+
+    // Быстрая проверка расхождений между ИИ-агентом и клиентским движком
+    std::vector<int> FindDivergentRegions(const HierarchicalHashRouter& remoteRouter) const {
+        std::vector<int> dirtyRegions;
+        if (m_globalRootHash == remoteRouter.m_globalRootHash) {
+            return dirtyRegions;
+        }
+        for (int r = 0; r < REGION_COUNT; ++r) {
+            if (m_regionHashes.at(r) != remoteRouter.m_regionHashes.at(r)) {
+                dirtyRegions.push_back(r);
+            }
+        }
+        return dirtyRegions;
+    }
+
+    // Возвращает индексы конкретных 500-метровых ячеек внутри региона для точечной докачки
+    std::vector<int> FindDivergentLeaves(int regionIndex, const HierarchicalHashRouter& remoteRouter) const {
+        std::vector<int> dirtyLeaves;
+        if (regionIndex < 0 || regionIndex >= REGION_COUNT) return dirtyLeaves;
+
+        int startLeaf = regionIndex * LEAVES_PER_REGION;
+        for (int l = 0; l < LEAVES_PER_REGION; ++l) {
+            int idx = startLeaf + l;
+            if (m_leafHashes.at(idx) != remoteRouter.m_leafHashes.at(idx)) {
+                dirtyLeaves.push_back(idx);
+            }
+        }
+        return dirtyLeaves;
+    }
+
+private:
+    std::vector<uint64_t> m_leafHashes;
+    std::vector<uint64_t> m_regionHashes;
+    uint64_t m_globalRootHash = 0ULL;
+
+    static uint64_t HashVec4(const Vec4& v) {
+        uint32_t ux = 0, uy = 0, uz = 0, uw = 0;
+        std::memcpy(&ux, &v.x, sizeof(uint32_t));
+        std::memcpy(&uy, &v.y, sizeof(uint32_t));
+        std::memcpy(&uz, &v.z, sizeof(uint32_t));
+        std::memcpy(&uw, &v.w, sizeof(uint32_t));
+        uint64_t a = (static_cast<uint64_t>(ux) << 32) | uy;
+        uint64_t b = (static_cast<uint64_t>(uz) << 32) | uw;
+        return a ^ (b * 0x9E3779B97F4A7C15ULL);
+    }
+};
 } // namespace Anatomical
